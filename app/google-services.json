@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "534301461996",
+    "project_id": "braintumourai-d3fe5",
+    "storage_bucket": "braintumourai-d3fe5.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:534301461996:android:75246a659882121cb384c9",
+        "android_client_info": {
+          "package_name": "com.example.braintumourai"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBDkE1DjB7AmpS87xUWC-IvhIRJ6OyGLqI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
