@@ -22,6 +22,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Date
 
@@ -34,6 +35,7 @@ fun DashboardScreen(
     val auth = remember { FirebaseAuth.getInstance() }
     val db = remember { FirebaseFirestore.getInstance() }
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     val dashboardViewModel: DashboardViewModel = viewModel()
 
@@ -53,18 +55,22 @@ fun DashboardScreen(
         mutableStateOf(false)
     }
 
-    var saving by remember {
+    var analyzing by remember {
         mutableStateOf(false)
+    }
+
+    var prediction by remember {
+        mutableStateOf<TumourPrediction?>(null)
     }
 
     // IMAGE PICKER
     val imagePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri ->
-
         selectedImage = uri
         previewBitmap = null
         imageValid = false
+        prediction = null
 
         dashboardViewModel.status = if (uri != null) {
             "Checking selected image..."
@@ -75,7 +81,6 @@ fun DashboardScreen(
 
     // IMAGE VALIDATION AND PREVIEW
     LaunchedEffect(selectedImage) {
-
         previewBitmap = null
         imageValid = false
 
@@ -130,7 +135,6 @@ fun DashboardScreen(
                     }
 
                     val options = BitmapFactory.Options()
-
                     var sampleSize = 1
 
                     while (
@@ -168,11 +172,10 @@ fun DashboardScreen(
             } else {
                 imageValid = false
                 dashboardViewModel.status = result.second
-                    ?: "Image validation failed. Please select another image."
+                    ?: "Image validation failed."
             }
 
         } catch (e: Exception) {
-
             previewBitmap = null
             imageValid = false
 
@@ -209,7 +212,6 @@ fun DashboardScreen(
         Card(
             modifier = Modifier.fillMaxWidth()
         ) {
-
             Column(
                 modifier = Modifier.padding(16.dp)
             ) {
@@ -231,9 +233,7 @@ fun DashboardScreen(
                         ),
                     contentAlignment = Alignment.Center
                 ) {
-
                     when {
-
                         previewLoading -> {
                             CircularProgressIndicator()
                         }
@@ -241,7 +241,7 @@ fun DashboardScreen(
                         previewBitmap != null -> {
                             Image(
                                 bitmap = previewBitmap!!.asImageBitmap(),
-                                contentDescription = "Validated MRI image preview",
+                                contentDescription = "MRI image preview",
                                 modifier = Modifier.fillMaxSize(),
                                 contentScale = ContentScale.Fit
                             )
@@ -269,7 +269,7 @@ fun DashboardScreen(
                         imagePicker.launch("image/*")
                     },
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = !previewLoading && !saving
+                    enabled = !previewLoading && !analyzing
                 ) {
                     Text(
                         if (selectedImage == null) {
@@ -290,11 +290,13 @@ fun DashboardScreen(
                             selectedImage = null
                             previewBitmap = null
                             imageValid = false
+                            prediction = null
+
                             dashboardViewModel.status =
                                 "Image removed successfully."
                         },
                         modifier = Modifier.fillMaxWidth(),
-                        enabled = !saving
+                        enabled = !analyzing
                     ) {
                         Text("Remove Image")
                     }
@@ -307,86 +309,150 @@ fun DashboardScreen(
         Text(
             dashboardViewModel.status,
             style = MaterialTheme.typography.bodyMedium,
-            color = if (imageValid) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                MaterialTheme.colorScheme.onSurface
-            }
+            color = MaterialTheme.colorScheme.primary
         )
 
         Spacer(Modifier.height(16.dp))
 
-        // SAVE DEMO RECORD
+        // ANALYSE MRI BUTTON
         Button(
             onClick = {
-
                 val uid = auth.currentUser?.uid
+                val bitmapToAnalyse = previewBitmap
                 val uri = selectedImage
 
                 if (uid == null) {
-
                     dashboardViewModel.status =
                         "Please sign in again."
-
-                } else if (uri == null) {
-
+                } else if (uri == null || bitmapToAnalyse == null || !imageValid) {
                     dashboardViewModel.status =
-                        "Please select an image first."
-
-                } else if (!imageValid || previewBitmap == null) {
-
-                    dashboardViewModel.status =
-                        "Please select a valid image before saving."
-
+                        "Please select a valid MRI image first."
                 } else {
 
-                    saving = true
+                    analyzing = true
+                    prediction = null
 
-                    val record = hashMapOf(
-                        "createdAt" to Date(),
-                        "status" to "NOT_ANALYSED",
-                        "message" to "Image validated. AI model is not integrated.",
-                        "selectedImageUri" to uri.toString()
-                    )
+                    dashboardViewModel.status =
+                        "Loading CNN model and analysing image..."
 
-                    db.collection("users")
-                        .document(uid)
-                        .collection("analyses")
-                        .add(record)
-                        .addOnSuccessListener {
+                    scope.launch {
+                        try {
+                            // Run TensorFlow Lite away from the UI thread.
+                            val result = withContext(Dispatchers.IO) {
 
-                            saving = false
+                                val classifier =
+                                    BrainTumourClassifier(context)
+
+                                try {
+                                    classifier.classify(bitmapToAnalyse)
+                                } finally {
+                                    classifier.close()
+                                }
+                            }
+
+                            prediction = result
 
                             dashboardViewModel.status =
-                                "Validated image record saved. No tumour prediction has been performed."
-                        }
-                        .addOnFailureListener { error ->
+                                "Analysis completed. Saving result..."
 
-                            saving = false
+                            // Save experimental prediction to Firestore.
+                            val record = hashMapOf(
+                                "createdAt" to Date(),
+                                "status" to "EXPERIMENTAL_RESULT",
+                                "message" to "Experimental CNN model output. Not a medical diagnosis.",
+                                "selectedImageUri" to uri.toString(),
+                                "predictedClass" to result.label,
+                                "confidence" to result.confidence.toDouble()
+                            )
 
+                            db.collection("users")
+                                .document(uid)
+                                .collection("analyses")
+                                .add(record)
+                                .addOnSuccessListener {
+                                    analyzing = false
+                                    dashboardViewModel.status =
+                                        "Experimental result saved to Firebase History."
+                                }
+                                .addOnFailureListener { error ->
+                                    analyzing = false
+                                    dashboardViewModel.status =
+                                        "Prediction completed, but saving failed: ${error.localizedMessage}"
+                                }
+
+                        } catch (e: Exception) {
+                            analyzing = false
                             dashboardViewModel.status =
-                                "Could not save record: ${error.localizedMessage}"
+                                "Analysis failed: ${e.localizedMessage ?: "Unknown error"}"
                         }
+                    }
                 }
             },
             modifier = Modifier.fillMaxWidth(),
-            enabled = !saving &&
+            enabled = !analyzing &&
                     !previewLoading &&
                     selectedImage != null &&
                     imageValid &&
                     previewBitmap != null
         ) {
             Text(
-                if (saving) "Saving..."
-                else "Save Demo Analysis Record"
+                if (analyzing) {
+                    "Analysing..."
+                } else {
+                    "Analyse MRI"
+                }
             )
         }
 
-        Spacer(Modifier.height(8.dp))
+        // ANALYSIS RESULT
+        if (prediction != null) {
+
+            Spacer(Modifier.height(20.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp)
+                ) {
+
+                    Text(
+                        "CNN Model Result",
+                        style = MaterialTheme.typography.titleLarge
+                    )
+
+                    Spacer(Modifier.height(12.dp))
+
+                    Text(
+                        "Predicted class: ${prediction!!.label}",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+
+                    Spacer(Modifier.height(8.dp))
+
+                    Text(
+                        "Model score: ${"%.2f".format(prediction!!.confidence * 100)}%"
+                    )
+
+                    Spacer(Modifier.height(8.dp))
+
+                    Text(
+                        "This is an experimental model output, not a medical diagnosis.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
 
         OutlinedButton(
             onClick = onOpenHistory,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !analyzing
         ) {
             Text("View History")
         }
@@ -395,7 +461,8 @@ fun DashboardScreen(
 
         OutlinedButton(
             onClick = onSignOut,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !analyzing
         ) {
             Text("Sign Out")
         }
